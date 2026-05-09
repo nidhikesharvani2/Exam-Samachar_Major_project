@@ -1,16 +1,10 @@
 # ╔══════════════════════════════════════════════════════════════════════╗
-# ║   EXAM SAMACHAR  v10.0  — Newspaper UI Edition                     ║
+# ║   EXAM SAMACHAR  v10.1  — Newspaper UI Edition (Fixed)             ║
 # ║                                                                      ║
-# ║  NEW IN v10.0:                                                      ║
-# ║   • 🗞 Full broadsheet newspaper masthead (horizontal title)        ║
-# ║   • 🎞 Smooth marquee — all 15 major Indian competitive exams       ║
-# ║   • 📂 History modal — click to preview & reopen any upload         ║
-# ║   • 🗂 Tab navigation (Analysis / MCQs / Raw JSON / OCR Text)       ║
-# ║   • 🎨 Playfair + Source Serif editorial typography                 ║
-# ║   • 📰 Broadsheet color palette (cream, rust, deep ink)            ║
-# ║   • 🔢 Numbered key points (not plain dots)                         ║
-# ║   • 📊 Two-column entity layout                                     ║
-# ║   • 🃏 MCQ cards with left-accent hover border                     ║
+# ║  FIXES in v10.1:                                                    ║
+# ║   • ❌ Removed OCR (Tesseract / EasyOCR) — Vision-only pipeline    ║
+# ║   • ✅ Fixed empty label warning on st.file_uploader               ║
+# ║   • ✅ Replaced use_container_width with width='stretch'/'content' ║
 # ╚══════════════════════════════════════════════════════════════════════╝
 
 import io, time, json, base64, ssl, certifi, requests, os, datetime
@@ -20,25 +14,12 @@ from PIL import Image
 import fitz
 from groq import Groq
 from dotenv import load_dotenv
-import os
 
 load_dotenv()
-
-
 
 ssl._create_default_https_context = lambda: ssl.create_default_context(
     cafile=certifi.where()
 )
-
-try:
-    import pytesseract; TESSERACT_OK = True
-except ImportError:
-    TESSERACT_OK = False
-
-try:
-    import easyocr; EASYOCR_OK = True
-except ImportError:
-    EASYOCR_OK = False
 
 try:
     from textblob import TextBlob; TEXTBLOB_OK = True
@@ -197,7 +178,7 @@ html,body,[class*="css"]{
   padding:0 1.4rem;
   display:flex; align-items:center; justify-content:space-between;
   height:38px; border-bottom:3px solid var(--rust);
-  margin:-1rem -1rem 0; /* bleed to edges */
+  margin:-1rem -1rem 0;
 }
 .topbar-date{font-family:'JetBrains Mono',monospace;font-size:0.63rem;color:#a09888;letter-spacing:0.07em;}
 .topbar-tag{font-family:'JetBrains Mono',monospace;font-size:0.63rem;color:var(--rust);
@@ -535,20 +516,19 @@ BHASHINI_LANG_CODES = {
     "Marathi":"mr","Gujarati":"gu","Kannada":"kn","Odia":"or",
     "Punjabi":"pa","Malayalam":"ml","Assamese":"as","Urdu":"ur",
 }
-BHASHINI_INFERENCE_URL = "https://dhruva-api.bhashini.gov.in/services/inference/pipeline"
 ENGLISH_LIKE_LANGS = {"English","Hindi"}
 
 MCQ_TYPES_FULL    = ["General MCQs","English Vocabulary","English Idioms & Phrases","Mixed (All Types)"]
 MCQ_TYPES_LIMITED = ["General MCQs"]
 
 EXAM_TONE_MAP = {
-    "SSC ":          {"positive":0.55,"neutral":0.30,"negative":0.15},
-    "Banking":          {"positive":0.50,"neutral":0.35,"negative":0.15},
-    "Railway":          {"positive":0.45,"neutral":0.40,"negative":0.15},
-    "Defence":          {"positive":0.60,"neutral":0.25,"negative":0.15},
+    "SSC":           {"positive":0.55,"neutral":0.30,"negative":0.15},
+    "Banking":       {"positive":0.50,"neutral":0.35,"negative":0.15},
+    "Railway":       {"positive":0.45,"neutral":0.40,"negative":0.15},
+    "Defence":       {"positive":0.60,"neutral":0.25,"negative":0.15},
     "General Knowledge":{"positive":0.40,"neutral":0.45,"negative":0.15},
-    "UPSC ":  {"positive":0.35,"neutral":0.45,"negative":0.20}}
-
+    "UPSC":          {"positive":0.35,"neutral":0.45,"negative":0.20},
+}
 
 MODELS = {
     "analysis":    ["llama-3.1-8b-instant","llama-3.3-70b-versatile"],
@@ -557,29 +537,19 @@ MODELS = {
     "translation": ["llama-3.1-8b-instant","llama-3.3-70b-versatile"],
 }
 
-# All 15 major Indian competitive exams
-EXAM_NAMES = [
-    "SSC","Banking","Railway","Defence","General Knowledge","UPSC"
-]
+EXAM_NAMES = ["SSC","Banking","Railway","Defence","General Knowledge","UPSC"]
+EXAM_CHOICES = EXAM_NAMES
 
-EXAM_CHOICES = EXAM_NAMES  # use same list for selectbox
 
-load_dotenv()
 # ════════════════════════════════════════════════════════════════════
 # GROQ CLIENT
 # ════════════════════════════════════════════════════════════════════
 @st.cache_resource
-
-# Load .env
-
-
 def get_groq():
-    key = os.getenv("GROQ_API_KEY")   # ✅ FIXED
-
+    key = os.getenv("GROQ_API_KEY")
     if not key:
         st.error("❌ GROQ_API_KEY missing in environment")
         return None
-
     try:
         return Groq(api_key=key)
     except Exception as e:
@@ -590,37 +560,8 @@ client = get_groq()
 if client is None:
     st.stop()
 
-# ✅ Bhashini variables
 BHASHINI_USER_ID = os.getenv("BHASHINI_USER_ID")
 BHASHINI_API_KEY = os.getenv("BHASHINI_API_KEY")
-
-
-
-# ════════════════════════════════════════════════════════════════════
-# OCR
-# ════════════════════════════════════════════════════════════════════
-@st.cache_resource
-def _easyocr_reader():
-    return easyocr.Reader(["en"], gpu=False, verbose=False) if EASYOCR_OK else None
-
-def run_ocr(img: Image.Image):
-    if TESSERACT_OK:
-        try:
-            t = pytesseract.image_to_string(img, config="--oem 3 --psm 6").strip()
-            if len(t) > 60:
-                return t, "Tesseract"
-        except Exception:
-            pass
-    r = _easyocr_reader()
-    if r:
-        try:
-            res = r.readtext(np.array(img), detail=0, paragraph=True)
-            t = "\n".join(res).strip()
-            if len(t) > 60:
-                return t, "EasyOCR"
-        except Exception:
-            pass
-    return "", "none"
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -720,13 +661,12 @@ def parse_arr(raw, warns):
 
 
 # ════════════════════════════════════════════════════════════════════
-# STAGE 1 — OCR/VISION → JSON
+# STAGE 1 — VISION → JSON  (OCR removed; Vision-only pipeline)
 # ════════════════════════════════════════════════════════════════════
 _SCHEMA = """{
   "headline":    "Main headline of the article",
   "subheadline": "Sub-headline or deck line, or empty string if none",
-  "date":        "Full publication date as it same from uploaded Page if you not understand you will Ask i didn't understand and fill dat e
-  ",
+  "date":        "Full publication date as visible on the page",
   "category":    "Politics | Economy | Science | Sports | International | State | Health | Education | etc.",
   "summary":     "5 to 8 complete sentences covering what happened, who, where, when, why, and impact.",
   "key_points": ["Minimum 6, maximum 10 key exam-relevant facts. Each must be a complete sentence of at least 15 words."],
@@ -753,30 +693,9 @@ ABSOLUTE RULES:
 6. key_points: 6-10 factual sentences, each at least 15 words, directly from the article.
 """
 
-def _build_analysis_prompt(text_content: str) -> str:
-    return (f"{_SYSTEM}\n\nReturn exactly this JSON schema:\n{_SCHEMA}\n\n"
-            f"NEWSPAPER TEXT:\n\"\"\"\n{text_content[:9000]}\n\"\"\"")
-
 def _build_vision_prompt() -> str:
     return (f"{_SYSTEM}\n\nCarefully read every word, number, date, and name visible in this "
             f"newspaper image.\nReturn exactly this JSON schema:\n{_SCHEMA}")
-
-def stage1_text(ocr: str):
-    warns = []
-    raw, model, w = groq_fallback(
-        [{"role":"user","content":_build_analysis_prompt(ocr)}],
-        "analysis", max_tokens=4096
-    )
-    warns.extend(w)
-    if not raw:
-        return None, model, warns + ["❌ Analysis returned nothing."]
-    result = parse_obj(raw, warns)
-    if isinstance(result, dict):
-        if result.get("error") == "not_newspaper":
-            return None, model, warns + ["⚠️ Not a newspaper page."]
-        if not result.get("raw_ocr_text"):
-            result["raw_ocr_text"] = ocr
-    return result, model, warns
 
 def stage1_vision(img_bytes: bytes):
     warns = []
@@ -981,10 +900,9 @@ def _speed_class(secs: float) -> str:
 def render_timing_card(timing: dict):
     if not timing: return
     total  = timing.get("total", 0)
-    ocr_t  = timing.get("ocr",   0)
     ai_t   = timing.get("ai",    0)
-    method = timing.get("method","—")
-    sp = _speed_class(total)
+    model  = timing.get("model","—")
+    sp     = _speed_class(total)
     st.markdown(f"""
     <div class="sec-head">⏱ Response Time Breakdown</div>
     <div class="timing-card">
@@ -993,17 +911,12 @@ def render_timing_card(timing: dict):
         <span class="time-badge {sp}">⏱ {total:.2f}s</span>
       </div>
       <div class="timing-row">
-        <span class="timing-label">🔍 OCR ({method})</span>
-        <div class="timing-bar"><div class="timing-fill" style="width:{min(100,(ocr_t/max(total,0.01))*100):.0f}%;background:var(--navy);"></div></div>
-        <span class="timing-val">{ocr_t:.2f}s</span>
-      </div>
-      <div class="timing-row">
-        <span class="timing-label">🤖 AI Analysis (Groq)</span>
+        <span class="timing-label">🤖 AI Vision Analysis (Groq)</span>
         <div class="timing-bar"><div class="timing-fill" style="width:{min(100,(ai_t/max(total,0.01))*100):.0f}%;background:var(--rust);"></div></div>
         <span class="timing-val">{ai_t:.2f}s</span>
       </div>
       <div style="margin-top:0.55rem;font-family:'JetBrains Mono',monospace;font-size:0.63rem;color:var(--ink3);">
-        Pipeline: {timing.get('pipeline','—')} &nbsp;·&nbsp; Model: {timing.get('model','—')}
+        Pipeline: Vision → JSON &nbsp;·&nbsp; Model: {model}
       </div>
     </div>
     """, unsafe_allow_html=True)
@@ -1034,11 +947,10 @@ def render_history_panel():
             unsafe_allow_html=True)
         return
     for i, item in enumerate(hist):
-        icon = "📄" if item["type"]=="pdf" else "🖼"
+        icon    = "📄" if item["type"]=="pdf" else "🖼"
         tag_cls = "pdf" if item["type"]=="pdf" else "img"
         tag_lbl = "PDF" if item["type"]=="pdf" else "IMG"
         pg_txt  = f"{item['pages']}p · " if item["pages"]>1 else ""
-        # Each history item is a clickable button (Streamlit way)
         col_hist, col_btn = st.columns([5,1])
         with col_hist:
             st.markdown(f"""<div class="hist-item">
@@ -1056,10 +968,9 @@ def render_history_panel():
 
 
 # ════════════════════════════════════════════════════════════════════
-# HISTORY MODAL (rendered in main area)
+# HISTORY MODAL
 # ════════════════════════════════════════════════════════════════════
 def render_history_modal():
-    """Render history preview modal if open."""
     if not st.session_state.get("show_hist_modal"):
         return
     _ensure_history()
@@ -1076,7 +987,7 @@ def render_history_modal():
             color:var(--cream);">📂 Upload History Preview</div>
         </div>""", unsafe_allow_html=True)
 
-        icon = "📄" if item["type"]=="pdf" else "🖼"
+        icon   = "📄" if item["type"]=="pdf" else "🖼"
         pg_txt = f"{item['pages']} page{'s' if item['pages']>1 else ''}"
         st.markdown(f"""
         <div style="background:var(--white);border:1px solid var(--col);border-radius:4px;padding:1.3rem;margin-bottom:1rem;">
@@ -1110,7 +1021,8 @@ def render_history_modal():
 
         c1, c2 = st.columns(2)
         with c1:
-            if st.button("✕ Close Preview", use_container_width=True):
+            # ✅ FIXED: use width='stretch' instead of use_container_width=True
+            if st.button("✕ Close Preview", key="close_hist_modal", width="stretch"):
                 st.session_state["show_hist_modal"] = False
                 st.rerun()
         with c2:
@@ -1125,44 +1037,36 @@ def pk(i): return f"page_{i}"
 def has_s1(key):
     return (key in st.session_state and isinstance(st.session_state[key].get("analysis"), dict))
 
-def run_stage1_silent(img: Image.Image, ocr_engine: str) -> dict:
+def run_stage1_silent(img: Image.Image) -> dict:
+    """Vision-only pipeline — no OCR dependency."""
     img_bytes = optimise_img(img)
     t0 = time.time()
-    if ocr_engine == "Vision only (no OCR)":
-        t_ocr_start = time.time()
-        result, model, warns = stage1_vision(img_bytes)
-        ocr, meth = "", "vision"
-        ocr_time = time.time() - t_ocr_start
-        ai_time  = 0.0
-        pipeline = "Vision → JSON"
-    else:
-        t_ocr_start = time.time()
-        ocr, meth = run_ocr(img)
-        ocr_time = time.time() - t_ocr_start
-        t_ai_start = time.time()
-        if ocr:
-            result, model, warns = stage1_text(ocr)
-            pipeline = f"{meth} → Text → AI → JSON"
-        else:
-            result, model, warns = stage1_vision(img_bytes)
-            meth = "vision"
-            pipeline = "OCR failed → Vision → JSON"
-        ai_time = time.time() - t_ai_start
+    result, model, warns = stage1_vision(img_bytes)
     total_time = time.time() - t0
-    timing = {"total":round(total_time,2),"ocr":round(ocr_time,2),"ai":round(ai_time,2),
-              "method":meth,"pipeline":pipeline if ocr_engine!="Vision only (no OCR)" else "Vision → JSON",
-              "model":model or "—"}
-    return {"analysis":result,"ocr_text":ocr,"ocr_method":meth,"model_used":model,"warnings":warns,"timing":timing}
+    timing = {
+        "total": round(total_time, 2),
+        "ai":    round(total_time, 2),
+        "method": "vision",
+        "pipeline": "Vision → JSON",
+        "model": model or "—",
+    }
+    return {
+        "analysis":   result,
+        "ocr_text":   "",
+        "ocr_method": "vision",
+        "model_used": model,
+        "warnings":   warns,
+        "timing":     timing,
+    }
 
 
 # ════════════════════════════════════════════════════════════════════
-# RENDER ONE PAGE  (with tab navigation)
+# RENDER ONE PAGE
 # ════════════════════════════════════════════════════════════════════
 def render_page(key: str, exam: str, lang: str, qtype: str):
     s        = st.session_state[key]
     analysis = s["analysis"]
-    ocr_text = s["ocr_text"]
-    ocr_meth = s["ocr_method"]
+    ocr_text = s.get("ocr_text", "")
     timing   = s.get("timing", {})
 
     for w in s.get("warnings", []):
@@ -1190,20 +1094,19 @@ def render_page(key: str, exam: str, lang: str, qtype: str):
         mcqs = stage3_mcqs(djson, eff_qtype, lang, exam)
 
     # Sentiment
-    sent_text = ocr_text or analysis.get("raw_ocr_text","") or analysis.get("summary","")
+    sent_text = analysis.get("raw_ocr_text","") or analysis.get("summary","")
     sent      = compute_sentiment(sent_text, exam)
     ai_s      = analysis.get("sentiment", {})
     ai_lbl    = ai_s.get("label", sent["label"]) if isinstance(ai_s,dict) else sent["label"]
     ai_rsn    = ai_s.get("reason","")             if isinstance(ai_s,dict) else ""
 
     # ── Article Masthead Card ──────────────────────────────────────
-    head = display.get("headline", analysis.get("headline","—"))
-    sub  = display.get("subheadline","")
-    date = analysis.get("date","")
-    cat  = analysis.get("category","")
-    ll   = ai_lbl.lower()
-    scls = "pos" if ll=="positive" else "neg" if ll=="negative" else "neu"
-    icon_s = "●"
+    head  = display.get("headline", analysis.get("headline","—"))
+    sub   = display.get("subheadline","")
+    date  = analysis.get("date","")
+    cat   = analysis.get("category","")
+    ll    = ai_lbl.lower()
+    scls  = "pos" if ll=="positive" else "neg" if ll=="negative" else "neu"
     t_total = timing.get("total", 0)
     t_cls   = _speed_class(t_total)
     t_label = f"⏱ {t_total:.2f}s" if t_total else ""
@@ -1214,37 +1117,34 @@ def render_page(key: str, exam: str, lang: str, qtype: str):
       {"<div class='article-deck'>" + sub + "</div>" if sub else ""}
       <div class="article-byline">
         {"<span>📅 " + date + "</span><span class='byline-sep'>|</span>" if date else ""}
-        <span>🔤 {ocr_meth}</span><span class="byline-sep">|</span>
+        <span>🔍 Vision AI</span><span class="byline-sep">|</span>
         <span>🌍 {lang}</span><span class="byline-sep">|</span>
-        <span class="byline-tag {scls}">{icon_s} {ai_lbl}</span>
+        <span class="byline-tag {scls}">● {ai_lbl}</span>
         {"<span class='byline-sep'>|</span><span class='time-badge " + t_cls + "'>" + t_label + "</span>" if t_label else ""}
       </div>
     </div>""", unsafe_allow_html=True)
 
     # ── Metrics Row ────────────────────────────────────────────────
     c1,c2,c3,c4 = st.columns(4)
-    c1.metric("📝 OCR Chars",  f"{len(ocr_text):,}")
+    c1.metric("🔍 Pipeline",   "Vision AI")
     c2.metric("❓ MCQs",       str(len(mcqs)))
     c3.metric("🎯 Confidence", str(sent["confidence"]))
     c4.metric("⏱ Analysis",   f"{t_total:.1f}s" if t_total else "—")
 
     st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
 
-    # ── Tab Navigation (using st.tabs) ────────────────────────────
-    tab1, tab2, tab3, tab4 = st.tabs(["📰 Analysis", f"📚 MCQs ({len(mcqs)})", "🔍 Raw JSON", "📄 OCR Text"])
+    # ── Tab Navigation ────────────────────────────────────────────
+    tab1, tab2, tab3, tab4 = st.tabs(["📰 Analysis", f"📚 MCQs ({len(mcqs)})", "🔍 Raw JSON", "📄 Extracted Text"])
 
     with tab1:
-        # Timing breakdown
         if timing:
             render_timing_card(timing)
 
-        # Summary
         summary = display.get("summary","")
         if summary:
             st.markdown('<div class="sec-head">📰 Article Summary</div>', unsafe_allow_html=True)
             st.markdown(f'<div class="summary-card">{summary}</div>', unsafe_allow_html=True)
 
-        # Two-column layout: Key Points + Entities
         col_left, col_right = st.columns([1.5, 1])
 
         with col_left:
@@ -1273,7 +1173,6 @@ def render_page(key: str, exam: str, lang: str, qtype: str):
                     if not items: continue
                     chips = "".join(f'<span class="ent-chip">{it}</span>' for it in items)
                     groups_html += f'<div class="ent-group"><div class="ent-label">{ico} {lbl}</div><div class="ent-chips">{chips}</div></div>'
-                # Numbers & Dates
                 nums = ents.get("important_numbers", [])
                 dts  = ents.get("important_dates", [])
                 if nums:
@@ -1284,11 +1183,10 @@ def render_page(key: str, exam: str, lang: str, qtype: str):
                     groups_html += f'<div class="ent-group"><div class="ent-label">📅 Dates</div><div class="ent-chips">{chips}</div></div>'
                 st.markdown(f'<div class="ent-card">{groups_html}</div>', unsafe_allow_html=True)
 
-            # Sentiment block
             st.markdown('<div class="sec-head" style="margin-top:1rem;">📊 Sentiment</div>', unsafe_allow_html=True)
             st.markdown(f"""<div class="ent-card">
               <div style="display:flex;align-items:center;gap:8px;margin-bottom:0.6rem;">
-                <span class="sent-badge {ll}">{icon_s} {ai_lbl}</span>
+                <span class="sent-badge {ll}">● {ai_lbl}</span>
               </div>
               {"<div style='font-family:Source Serif 4,serif;font-size:0.82rem;color:var(--ink3);font-style:italic;margin-bottom:0.7rem;'>" + ai_rsn + "</div>" if ai_rsn else ""}
               <div style="display:flex;gap:8px;flex-wrap:wrap;">
@@ -1318,9 +1216,9 @@ def render_page(key: str, exam: str, lang: str, qtype: str):
             st.markdown('<div style="text-align:center;padding:1.5rem;color:var(--ink3);font-style:italic;font-family:\'Source Serif 4\',serif;">No MCQs generated. Try re-analysing this page.</div>', unsafe_allow_html=True)
         else:
             for i, q in enumerate(mcqs, 1):
-                opts     = q.get("options", [])
+                opts      = q.get("options", [])
                 opts_html = "".join(f'<div class="mcq-opt">{o}</div>' for o in opts)
-                qt       = q.get("question_type","MCQ")
+                qt        = q.get("question_type","MCQ")
                 st.markdown(f"""<div class="mcq-card">
                   <div class="mcq-q-num">Question {i:02d} <span class="mcq-q-type">{qt}</span></div>
                   <div class="mcq-question">{q.get('question','')}</div>
@@ -1341,17 +1239,18 @@ def render_page(key: str, exam: str, lang: str, qtype: str):
             st.json(timing)
 
     with tab4:
-        if ocr_text:
-            st.text_area(f"OCR Text ({ocr_meth})", ocr_text, height=320, key=f"ocr_ta_{key}")
+        raw_text = analysis.get("raw_ocr_text", "")
+        if raw_text:
+            st.text_area("Extracted Text (Vision AI)", raw_text, height=320, key=f"ocr_ta_{key}")
         else:
-            st.markdown('<div style="color:var(--ink3);font-style:italic;padding:1rem 0;font-family:\'Source Serif 4\',serif;">No OCR text (Vision mode was used).</div>', unsafe_allow_html=True)
+            st.markdown('<div style="color:var(--ink3);font-style:italic;padding:1rem 0;font-family:\'Source Serif 4\',serif;">No text extracted yet — re-analyse to populate.</div>', unsafe_allow_html=True)
 
 
 # ════════════════════════════════════════════════════════════════════
 # BUILD TICKER HTML
 # ════════════════════════════════════════════════════════════════════
 def build_ticker() -> str:
-    items = (EXAM_NAMES * 3)  # triple for seamless long loop
+    items = (EXAM_NAMES * 3)
     parts = []
     for name in items:
         parts.append(f'<span class="ticker-item"><span class="ticker-dot"></span>{name}</span>')
@@ -1363,7 +1262,6 @@ def build_ticker() -> str:
 # SIDEBAR
 # ════════════════════════════════════════════════════════════════════
 with st.sidebar:
-    # Sidebar masthead
     st.markdown("""
     <div style="padding:0.8rem 0 0.5rem;">
       <div style="font-family:'Playfair Display',serif;font-size:1.5rem;font-weight:900;color:var(--ink);line-height:1;">
@@ -1373,39 +1271,33 @@ with st.sidebar:
         An AI Decision Support System
       </div>
       <div style="font-family:'JetBrains Mono',monospace;font-size:0.58rem;color:var(--col2);letter-spacing:0.06em;margin-top:2px;">
-    Newspaper Edition
+        Newspaper Edition · Vision AI Pipeline
       </div>
     </div>
     """, unsafe_allow_html=True)
 
     st.markdown('<div style="height:1px;background:var(--col);margin:0.5rem 0 0;"></div>', unsafe_allow_html=True)
 
-    # Settings
     st.markdown('<div class="sb-lbl"><span class="sb-dot"></span>Settings</div>', unsafe_allow_html=True)
 
     st.markdown('<div style="font-size:0.68rem;color:var(--ink3);margin-bottom:3px;font-family:\'JetBrains Mono\',monospace;">🌍 Language</div>', unsafe_allow_html=True)
-    language_choice = st.selectbox("lang_sel", ["English"] + list(BHASHINI_LANG_CODES.keys()),
+    language_choice = st.selectbox("Language", ["English"] + list(BHASHINI_LANG_CODES.keys()),
                                    key="lang", label_visibility="collapsed")
 
     is_limited_lang = language_choice not in ENGLISH_LIKE_LANGS
     avail_qtypes    = MCQ_TYPES_LIMITED if is_limited_lang else MCQ_TYPES_FULL
 
     st.markdown('<div style="font-size:0.68rem;color:var(--ink3);margin-bottom:3px;margin-top:0.6rem;font-family:\'JetBrains Mono\',monospace;">🎯 Exam Type</div>', unsafe_allow_html=True)
-    exam_type = st.selectbox("exam_sel", EXAM_CHOICES, key="exam", label_visibility="collapsed")
+    exam_type = st.selectbox("Exam Type", EXAM_CHOICES, key="exam", label_visibility="collapsed")
 
     st.markdown('<div style="font-size:0.68rem;color:var(--ink3);margin-bottom:3px;margin-top:0.6rem;font-family:\'JetBrains Mono\',monospace;">📝 MCQ Type</div>', unsafe_allow_html=True)
-    question_type = st.selectbox("qtype_sel", avail_qtypes, key="qtype", label_visibility="collapsed")
-
-    st.markdown('<div style="font-size:0.68rem;color:var(--ink3);margin-bottom:3px;margin-top:0.6rem;font-family:\'JetBrains Mono\',monospace;">🔍 OCR Engine</div>', unsafe_allow_html=True)
-    ocr_engine = st.selectbox("ocr_sel", ["Auto (Tesseract → EasyOCR)","Vision only (no OCR)"],
-                               key="ocr", label_visibility="collapsed")
+    question_type = st.selectbox("MCQ Type", avail_qtypes, key="qtype", label_visibility="collapsed")
 
     if is_limited_lang:
         st.markdown(f'<div class="lang-notice" style="margin-top:6px;">ℹ️ {language_choice}: General MCQs only.</div>', unsafe_allow_html=True)
 
     st.markdown('<div style="height:1px;background:var(--col);margin:1rem 0 0.5rem;"></div>', unsafe_allow_html=True)
 
-    # Status
     st.markdown('<div class="sb-lbl"><span class="sb-dot"></span>System</div>', unsafe_allow_html=True)
     cols_st = st.columns(2)
     with cols_st[0]:
@@ -1418,13 +1310,13 @@ with st.sidebar:
 
     st.markdown('<div style="height:1px;background:var(--col);margin:0.8rem 0 0.4rem;"></div>', unsafe_allow_html=True)
 
-    # Upload History
     st.markdown('<div class="sb-lbl"><span class="sb-dot"></span>Upload History</div>', unsafe_allow_html=True)
     render_history_panel()
 
     st.markdown('<div style="height:1px;background:var(--col);margin:0.6rem 0 0.4rem;"></div>', unsafe_allow_html=True)
 
-    if st.button("🗑 Clear All & History", use_container_width=True):
+    # ✅ FIXED: width='stretch' instead of use_container_width=True
+    if st.button("🗑 Clear All & History", key="clear_all", width="stretch"):
         for k in [k for k in st.session_state if k.startswith("page_") or k in ("_fid","_pdf","show_hist_modal","hist_preview_idx")]:
             del st.session_state[k]
         st.session_state["upload_history"] = []
@@ -1434,17 +1326,15 @@ with st.sidebar:
 # ════════════════════════════════════════════════════════════════════
 # TOP BAR + MASTHEAD + TICKER
 # ════════════════════════════════════════════════════════════════════
-now = datetime.datetime.now()
+now      = datetime.datetime.now()
 date_str = now.strftime("%A, %d %B %Y")
 
-# Top dateline bar
 st.markdown(f"""<div class="topbar">
   <div class="topbar-date">{date_str} &nbsp;|&nbsp; Indore Edition</div>
   <div class="topbar-center">India's Premier Competitive Exam Intelligence Platform</div>
-  <div class="topbar-tag">v10.0 ENHANCED</div>
+  <div class="topbar-tag">v10.1 FIXED</div>
 </div>""", unsafe_allow_html=True)
 
-# Masthead
 st.markdown(f"""<div class="masthead-wrap">
   <div class="masthead-inner">
     <div class="masthead-left">
@@ -1457,7 +1347,7 @@ st.markdown(f"""<div class="masthead-wrap">
       <div class="mh-rule"><div class="mh-line"></div><div class="mh-diamond"></div><div class="mh-line"></div></div>
       <div class="newspaper-name">Exam <span>Samachar</span></div>
       <div class="mh-rule"><div class="mh-line"></div><div class="mh-diamond"></div><div class="mh-line"></div></div>
-      <div class="masthead-tagline">An AI Decision Support System </div>
+      <div class="masthead-tagline">An AI Decision Support System</div>
     </div>
     <div class="masthead-right">
       <div class="mh-val" style="color:var(--rust);font-weight:600;">Groq AI</div>
@@ -1474,7 +1364,6 @@ st.markdown(f"""<div class="masthead-wrap">
   </div>
 </div>""", unsafe_allow_html=True)
 
-# Ticker
 ticker_html = build_ticker()
 st.markdown(f"""<div class="ticker-wrap">
   <div class="ticker-label">EXAMS ▶</div>
@@ -1486,14 +1375,19 @@ st.markdown(f"""<div class="ticker-wrap">
 st.markdown("<div style='margin-top:1.2rem;'></div>", unsafe_allow_html=True)
 
 # ════════════════════════════════════════════════════════════════════
-# HISTORY MODAL (if open, show before file upload)
+# HISTORY MODAL
 # ════════════════════════════════════════════════════════════════════
 render_history_modal()
 
 # ════════════════════════════════════════════════════════════════════
 # FILE UPLOAD
+# ✅ FIXED: label is non-empty, hidden with label_visibility="collapsed"
 # ════════════════════════════════════════════════════════════════════
-uploaded = st.file_uploader("", type=["jpg","jpeg","png","pdf"], label_visibility="collapsed")
+uploaded = st.file_uploader(
+    "Upload newspaper image or PDF",
+    type=["jpg","jpeg","png","pdf"],
+    label_visibility="collapsed"
+)
 
 if not uploaded:
     st.markdown("""<div class="upload-hint">
@@ -1510,7 +1404,7 @@ if not uploaded:
         <span class="mpill navy" style="font-size:0.65rem;">🌐 Multi-Language</span>
       </div>
     </div>""", unsafe_allow_html=True)
-    st.markdown('<div class="app-footer">Exam Samachar v10.0 · Newspaper UI Edition · Groq AI · Bhashini · Streamlit</div>', unsafe_allow_html=True)
+    st.markdown('<div class="app-footer">Exam Samachar v10.1 · Vision AI Pipeline · Groq AI · Bhashini · Streamlit</div>', unsafe_allow_html=True)
     st.stop()
 
 # Reset state on new file
@@ -1538,11 +1432,9 @@ if uploaded.type == "application/pdf":
     total = len(pages)
     done  = sum(1 for i in range(total) if has_s1(pk(i)))
 
-    # Add to history
     ts = now.strftime("%d %b %Y, %I:%M %p")
     add_to_history(uploaded.name, "pdf", uploaded.size/1024, total, ts)
 
-    # Progress header
     hd_col, btn_col = st.columns([3, 1])
     with hd_col:
         pct = done/total if total else 0
@@ -1559,7 +1451,8 @@ if uploaded.type == "application/pdf":
             avg_t = sum(timings)/len(timings) if timings else 0
             st.success(f"✅ All {total} pages complete — {total*10} MCQs ready · avg {avg_t:.1f}s/page")
     with btn_col:
-        analyse_all = st.button(f"🚀 Analyse All {total} Pages", use_container_width=True)
+        # ✅ FIXED: width='stretch'
+        analyse_all = st.button(f"🚀 Analyse All {total} Pages", key="analyse_all", width="stretch")
 
     if analyse_all:
         pending = [i for i in range(total) if not has_s1(pk(i))]
@@ -1567,29 +1460,26 @@ if uploaded.type == "application/pdf":
             prog = st.progress(0, text="Analysing pages …")
             for step, i in enumerate(pending, 1):
                 prog.progress(step/len(pending), text=f"Analysing page {i+1}/{total} …")
-                st.session_state[pk(i)] = run_stage1_silent(pages[i], ocr_engine)
+                st.session_state[pk(i)] = run_stage1_silent(pages[i])
             prog.empty()
             st.rerun()
 
     for i, img in enumerate(pages):
         key = pk(i)
-        # Page separator
         st.markdown(f"""<div class="page-sep">
           <div class="page-sep-line"></div>
           <div class="page-sep-label">📄 Page <span>{i+1}</span> of {total}</div>
           <div class="page-sep-line"></div>
         </div>""", unsafe_allow_html=True)
 
-        # Status + timing
         if has_s1(key):
-            t = st.session_state[key].get("timing",{}).get("total",0)
+            t  = st.session_state[key].get("timing",{}).get("total",0)
             tc = _speed_class(t)
             st.markdown(f'<span class="page-chip done">✓ Analysed</span>&nbsp;&nbsp;<span class="time-badge {tc}">⏱ {t:.2f}s</span>',
                         unsafe_allow_html=True)
         else:
             st.markdown('<span class="page-chip pending">⏳ Pending analysis</span>', unsafe_allow_html=True)
 
-        # Page image
         st.markdown('<div class="page-img-wrap">', unsafe_allow_html=True)
         st.image(img, use_container_width=True)
         st.markdown('</div>', unsafe_allow_html=True)
@@ -1599,9 +1489,10 @@ if uploaded.type == "application/pdf":
         else:
             pc, _ = st.columns([1, 3])
             with pc:
-                if st.button(f"🚀 Analyse Page {i+1}", key=f"abtn_{i}", use_container_width=True):
+                # ✅ FIXED: width='stretch'
+                if st.button(f"🚀 Analyse Page {i+1}", key=f"abtn_{i}", width="stretch"):
                     with st.spinner(f"Analysing page {i+1} …"):
-                        st.session_state[key] = run_stage1_silent(img, ocr_engine)
+                        st.session_state[key] = run_stage1_silent(img)
                     st.rerun()
             st.markdown(
                 '<div style="text-align:center;padding:1rem;font-family:\'Source Serif 4\',serif;'
@@ -1629,8 +1520,8 @@ else:
         st.markdown("""<div class="how-card">
           <div class="how-title">How it works</div>
           <div class="how-step">
-            1. Click Analyse — OCR + AI extraction runs<br>
-            2. ⏱ Response time tracked (OCR + AI split)<br>
+            1. Click Analyse — Vision AI reads the image directly<br>
+            2. ⏱ Response time tracked<br>
             3. Summary, key points &amp; entities shown<br>
             4. 10 MCQs generated from this page's facts<br>
             5. Upload history saved in sidebar<br>
@@ -1638,14 +1529,15 @@ else:
           </div>
         </div>""", unsafe_allow_html=True)
 
-        if st.button("🚀 Analyse", use_container_width=True, key="analyse_img"):
+        # ✅ FIXED: width='stretch'
+        if st.button("🚀 Analyse", key="analyse_img", width="stretch"):
             with st.spinner("Analysing …"):
-                st.session_state[key] = run_stage1_silent(img, ocr_engine)
+                st.session_state[key] = run_stage1_silent(img)
             st.rerun()
 
         if has_s1(key):
-            m = st.session_state[key].get("model_used","—")
-            t = st.session_state[key].get("timing",{}).get("total",0)
+            m  = st.session_state[key].get("model_used","—")
+            t  = st.session_state[key].get("timing",{}).get("total",0)
             tc = _speed_class(t)
             st.markdown(f'<div class="status-ok" style="margin-top:0.5rem;">✓ Analysed · {m}</div>', unsafe_allow_html=True)
             st.markdown(f'<div class="time-badge {tc}" style="margin-top:6px;">⏱ {t:.2f}s total</div>', unsafe_allow_html=True)
@@ -1665,5 +1557,5 @@ else:
 # FOOTER
 # ════════════════════════════════════════════════════════════════════
 st.markdown("""<div class="app-footer">
- Newspaper UI Edition · Per-page MCQs · ⏱ Response Timing · 📂 Upload History · 🇮🇳 Bhashini · Streamlit + Groq AI
+  Exam Samachar v10.1 · Vision AI Pipeline (OCR-free) · ⏱ Response Timing · 📂 Upload History · 🇮🇳 Bhashini · Streamlit + Groq AI
 </div>""", unsafe_allow_html=True)
