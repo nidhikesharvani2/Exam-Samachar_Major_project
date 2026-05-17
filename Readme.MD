@@ -9,11 +9,7 @@ OCR → AI extraction → Sentiment → 10 MCQs per page · 12 Indian languages.
 
 2. **Go to** [share.streamlit.io](https://share.streamlit.io) → *New app* → select your repo → `app.py`
 
-3. **Add secrets** — in Streamlit Cloud dashboard → *Settings* → *Secrets*:
-   ```toml
-   GROQ_API_KEY      = "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"
-   BHASHINI_USER_ID  = "Nidhi Kesharvani"
-   BHASHINI_API_KEY  = "130bcff401-6bd6-4fbd-abec-1259a214cabe"
+3
 
    ```
    Get a free Groq key at [console.groq.com](https://console.groq.com)
